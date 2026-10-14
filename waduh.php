@@ -37,7 +37,7 @@ $root_path = $_SERVER['DOCUMENT_ROOT'];
 // Auth users  — username => bcrypt hash
 // Generate: php -r "echo password_hash('yourpassword', PASSWORD_DEFAULT);"
 $auth_users = [
-    'adminsiapa' => '$2a$12$zrvpHDJZ9dUz1L7gk6k6wOxwVLm5t6hDh5q8WVUx.Ff8yjSucEWzW',
+    'adminsiapa' => '$2a$12$qkQogjHkyChKOEgyzPwMq.PT2GxG8.QLXM8tRqOcFNA3bqz/APwja',
 ];
 
 $readonly_users = [];
